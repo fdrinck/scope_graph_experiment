@@ -1,42 +1,32 @@
-use rowan::{
-    GreenNodeBuilder, Language, SyntaxNode as RowanSyntaxNode, SyntaxToken as RowanSyntaxToken,
-};
+use rowan::{GreenNodeBuilder, Language};
 
-#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
 pub enum SyntaxKind {
-    // Tokens
-    WHITESPACE = 0,
-    LET_KW,
-    SCOPE_KW,
-    IMPORT_KW,
-    IDENT,
-    INT,
-    PLUS,
-    MINUS,
-    STAR,
-    EQ,
-    DOT,
-    SEMICOLON,
-    L_CURLY,
-    R_CURLY,
-    ERROR,
+    Ident,
+    Int,
+    LetKw,
+    ScopeKw,
+    ImportKw,
+    Dot,
+    Semicolon,
+    Eq,
+    Star,
+    Plus,
+    LCurly,
+    RCurly,
+    Whitespace,
+    Error,
 
-    // Composite Nodes
-    SOURCE_FILE,
-    LET_STMT,
-    SCOPE_DEF,
-    IMPORT_STMT,
-    EXPR_STMT,
-    BLOCK_EXPR,
-    BINARY_EXPR,
-    LITERAL,
-    NAME_REF,
-    PATH,
+    SourceFile,
+    ScopeDef,
+    BlockExpr,
+    LetStmt,
+    ImportStmt,
+    Name,
+    NameRef,
+    Path,
 }
-
-use SyntaxKind::*;
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
     fn from(kind: SyntaxKind) -> Self {
@@ -45,13 +35,12 @@ impl From<SyntaxKind> for rowan::SyntaxKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Lang {}
+pub struct Lang;
 
 impl Language for Lang {
     type Kind = SyntaxKind;
 
     fn kind_from_raw(raw: rowan::SyntaxKind) -> Self::Kind {
-        assert!(raw.0 <= PATH as u16);
         unsafe { std::mem::transmute(raw.0) }
     }
 
@@ -60,288 +49,277 @@ impl Language for Lang {
     }
 }
 
-pub type SyntaxNode = RowanSyntaxNode<Lang>;
-pub type SyntaxToken = RowanSyntaxToken<Lang>;
+pub type SyntaxNode = rowan::SyntaxNode<Lang>;
+pub type SyntaxToken = rowan::SyntaxToken<Lang>;
 
-pub struct Lexer<'a> {
-    source: &'a str,
-    cursor: usize,
+pub fn parse(code: &str) -> SyntaxNode {
+    let mut builder = GreenNodeBuilder::new();
+    {
+        let mut parser = Parser::new(code, &mut builder);
+        parser.parse_source_file();
+    }
+    SyntaxNode::new_root(builder.finish())
 }
 
-impl<'a> Lexer<'a> {
-    pub fn new(source: &'a str) -> Self {
-        Self { source, cursor: 0 }
-    }
-
-    /// Peeks the character at the current cursor position.
-    #[inline]
-    fn peek(&self) -> Option<char> {
-        self.source[self.cursor..].chars().next()
-    }
-
-    /// Consumes the current character and advances the cursor.
-    #[inline]
-    fn bump(&mut self) -> Option<char> {
-        let c = self.peek()?;
-        self.cursor += c.len_utf8();
-        Some(c)
-    }
-
-    /// Advances while `predicate` holds true.
-    #[inline]
-    fn eat_while(&mut self, mut predicate: impl FnMut(char) -> bool) {
-        while self.peek().is_some_and(&mut predicate) {
-            self.bump();
-        }
-    }
-
-    pub fn next_token(&mut self) -> Option<(SyntaxKind, &'a str)> {
-        if self.cursor >= self.source.len() {
-            return None;
-        }
-
-        let start = self.cursor;
-        let first = self.bump()?;
-
-        let kind = match first {
-            c if c.is_whitespace() => {
-                self.eat_while(|c| c.is_whitespace());
-                WHITESPACE
-            }
-            '0'..='9' => {
-                self.eat_while(|c| c.is_ascii_digit());
-                INT
-            }
-            'a'..='z' | 'A'..='Z' | '_' => {
-                self.eat_while(|c| c.is_alphanumeric() || c == '_');
-                match &self.source[start..self.cursor] {
-                    "let" => LET_KW,
-                    "scope" => SCOPE_KW,
-                    "import" => IMPORT_KW,
-                    _ => IDENT,
-                }
-            }
-            '+' => PLUS,
-            '-' => MINUS,
-            '*' => STAR,
-            '=' => EQ,
-            '.' => DOT,
-            ';' => SEMICOLON,
-            '{' => L_CURLY,
-            '}' => R_CURLY,
-            _ => ERROR,
-        };
-
-        Some((kind, &self.source[start..self.cursor]))
-    }
-}
-
-pub struct Parser<'a> {
-    tokens: Vec<(SyntaxKind, &'a str)>,
+struct Parser<'a, 'b> {
+    code: &'a str,
     pos: usize,
-    builder: GreenNodeBuilder<'static>,
+    builder: &'b mut GreenNodeBuilder<'static>,
 }
 
-impl<'a> Parser<'a> {
-    pub fn new(input: &'a str) -> Self {
-        let mut lexer = Lexer::new(input);
-        let mut tokens = Vec::new();
-        while let Some(token) = lexer.next_token() {
-            tokens.push(token);
-        }
-
+impl<'a, 'b> Parser<'a, 'b> {
+    fn new(code: &'a str, builder: &'b mut GreenNodeBuilder<'static>) -> Self {
         Self {
-            tokens,
+            code,
             pos: 0,
-            builder: GreenNodeBuilder::new(),
+            builder,
         }
     }
 
-    fn peek(&self) -> Option<SyntaxKind> {
-        self.tokens.get(self.pos).map(|(k, _)| *k)
-    }
+    fn parse_source_file(&mut self) {
+        self.builder.start_node(SyntaxKind::SourceFile.into());
+        self.skip_whitespace();
 
-    fn bump(&mut self) {
-        if let Some((kind, text)) = self.tokens.get(self.pos) {
-            self.builder.token((*kind).into(), text);
-            self.pos += 1;
-        }
-    }
-
-    fn eat_ws(&mut self) {
-        while self.peek() == Some(WHITESPACE) {
-            self.bump();
-        }
-    }
-
-    pub fn parse(mut self) -> SyntaxNode {
-        self.builder.start_node(SOURCE_FILE.into());
-        while self.peek().is_some() {
+        while self.pos < self.code.len() {
             self.parse_stmt();
+            self.skip_whitespace();
         }
+
         self.builder.finish_node();
-        SyntaxNode::new_root(self.builder.finish())
     }
 
     fn parse_stmt(&mut self) {
-        self.eat_ws();
-        match self.peek() {
-            Some(LET_KW) => self.parse_let_stmt(),
-            Some(SCOPE_KW) => self.parse_scope_def(),
-            Some(IMPORT_KW) => self.parse_import_stmt(),
-            Some(_) => self.parse_expr_stmt(),
-            None => {}
+        self.skip_whitespace();
+        if self.looking_at("scope") {
+            self.parse_scope_def();
+        } else if self.looking_at("let") {
+            self.parse_let_stmt();
+        } else if self.looking_at("import") {
+            self.parse_import_stmt();
+        } else if self.looking_at("{") {
+            self.parse_block();
+        } else {
+            self.parse_expr_stmt();
         }
     }
 
     fn parse_scope_def(&mut self) {
-        self.builder.start_node(SCOPE_DEF.into());
-        self.bump();
-        self.eat_ws();
+        self.builder.start_node(SyntaxKind::ScopeDef.into());
+        self.consume_keyword("scope", SyntaxKind::ScopeKw);
+        self.skip_whitespace();
 
-        if self.peek() == Some(IDENT) {
-            self.builder.start_node(NAME_REF.into());
-            self.bump();
+        if let Some(ident) = self.consume_ident_str() {
+            self.builder.start_node(SyntaxKind::Name.into());
+            self.builder.token(SyntaxKind::Ident.into(), ident);
             self.builder.finish_node();
         }
-        self.eat_ws();
 
-        if self.peek() == Some(L_CURLY) {
-            let checkpoint = self.builder.checkpoint();
-            self.parse_block(checkpoint);
-        }
-        self.builder.finish_node();
-    }
-
-    fn parse_import_stmt(&mut self) {
-        self.builder.start_node(IMPORT_STMT.into());
-        self.bump();
-        self.eat_ws();
-
-        self.parse_path();
-        self.eat_ws();
-
-        if self.peek() == Some(SEMICOLON) {
-            self.bump();
-        }
-        self.builder.finish_node();
-    }
-
-    fn parse_path(&mut self) {
-        self.builder.start_node(PATH.into());
-        if self.peek() == Some(IDENT) {
-            self.bump();
-        }
-        loop {
-            self.eat_ws();
-            if self.peek() == Some(DOT) {
-                self.bump();
-                self.eat_ws();
-                if self.peek() == Some(IDENT) {
-                    self.bump();
-                }
-            } else {
-                break;
-            }
+        self.skip_whitespace();
+        if self.looking_at("{") {
+            self.parse_block();
         }
         self.builder.finish_node();
     }
 
     fn parse_let_stmt(&mut self) {
-        self.builder.start_node(LET_STMT.into());
-        self.bump();
-        self.eat_ws();
+        self.builder.start_node(SyntaxKind::LetStmt.into());
+        self.consume_keyword("let", SyntaxKind::LetKw);
+        self.skip_whitespace();
 
-        if self.peek() == Some(IDENT) {
-            self.builder.start_node(NAME_REF.into());
-            self.bump();
+        if let Some(ident) = self.consume_ident_str() {
+            self.builder.start_node(SyntaxKind::Name.into());
+            self.builder.token(SyntaxKind::Ident.into(), ident);
             self.builder.finish_node();
         }
-        self.eat_ws();
 
-        if self.peek() == Some(EQ) {
-            self.bump();
+        self.skip_whitespace();
+        if self.consume_char('=') {
+            self.skip_whitespace();
+            self.parse_expr();
         }
-        self.eat_ws();
 
-        self.parse_expr(0);
-        self.eat_ws();
+        self.skip_whitespace();
+        self.consume_char(';');
+        self.builder.finish_node();
+    }
 
-        if self.peek() == Some(SEMICOLON) {
-            self.bump();
+    fn parse_import_stmt(&mut self) {
+        self.builder.start_node(SyntaxKind::ImportStmt.into());
+        self.consume_keyword("import", SyntaxKind::ImportKw);
+        self.skip_whitespace();
+
+        self.parse_path();
+
+        self.skip_whitespace();
+        self.consume_char(';');
+        self.builder.finish_node();
+    }
+
+    fn parse_block(&mut self) {
+        self.builder.start_node(SyntaxKind::BlockExpr.into());
+        self.consume_char('{');
+
+        while self.pos < self.code.len() && !self.looking_at("}") {
+            self.parse_stmt();
+            self.skip_whitespace();
         }
+
+        self.consume_char('}');
         self.builder.finish_node();
     }
 
     fn parse_expr_stmt(&mut self) {
-        self.builder.start_node(EXPR_STMT.into());
-        self.parse_expr(0);
-        self.eat_ws();
-        if self.peek() == Some(SEMICOLON) {
-            self.bump();
-        }
-        self.builder.finish_node();
+        self.parse_expr();
+        self.skip_whitespace();
+        self.consume_char(';');
     }
 
-    fn parse_expr(&mut self, min_bp: u8) {
-        self.eat_ws();
-        let checkpoint = self.builder.checkpoint();
+    fn parse_expr(&mut self) {
+        self.parse_binary_expr(0);
+    }
 
-        match self.peek() {
-            Some(INT) => {
-                self.builder.start_node_at(checkpoint, LITERAL.into());
-                self.bump();
-                self.builder.finish_node();
-            }
-            Some(IDENT) => {
-                self.builder.start_node_at(checkpoint, NAME_REF.into());
-                self.bump();
-                self.builder.finish_node();
-            }
-            Some(L_CURLY) => {
-                self.parse_block(checkpoint);
-            }
-            _ => return,
-        }
+    fn parse_binary_expr(&mut self, min_bp: u8) {
+        self.skip_whitespace();
+        self.parse_primary_expr();
 
         loop {
-            self.eat_ws();
-            let (l_bp, r_bp) = match self.peek() {
-                Some(PLUS) | Some(MINUS) => (1, 2),
-                Some(STAR) => (3, 4),
-                _ => break,
+            self.skip_whitespace();
+            let op = if self.looking_at("+") {
+                Some(('+', 1))
+            } else if self.looking_at("*") {
+                Some(('*', 2))
+            } else {
+                None
             };
 
-            if l_bp < min_bp {
+            if let Some((ch, bp)) = op {
+                if bp < min_bp {
+                    break;
+                }
+                self.consume_char(ch);
+                self.parse_binary_expr(bp + 1);
+            } else {
                 break;
             }
-
-            self.builder.start_node_at(checkpoint, BINARY_EXPR.into());
-            self.bump();
-            self.parse_expr(r_bp);
-            self.builder.finish_node();
         }
     }
 
-    fn parse_block(&mut self, checkpoint: rowan::Checkpoint) {
-        self.builder.start_node_at(checkpoint, BLOCK_EXPR.into());
-        self.bump();
+    fn parse_primary_expr(&mut self) {
+        self.skip_whitespace();
+        if self.looking_at_ident_start() {
+            self.parse_path();
+        } else if self.looking_at_number() {
+            let num = self.consume_number();
+            self.builder.token(SyntaxKind::Int.into(), num);
+        }
+    }
 
-        loop {
-            self.eat_ws();
-            match self.peek() {
-                Some(R_CURLY) => {
-                    self.bump();
-                    break;
-                }
-                None => break,
-                _ => self.parse_stmt(),
+    fn parse_path(&mut self) {
+        self.builder.start_node(SyntaxKind::Path.into());
+        if let Some(ident) = self.consume_ident_str() {
+            self.builder.token(SyntaxKind::Ident.into(), ident);
+        }
+
+        while self.looking_at(".") {
+            self.consume_char('.');
+            self.skip_whitespace();
+            if let Some(ident) = self.consume_ident_str() {
+                self.builder.token(SyntaxKind::Ident.into(), ident);
             }
         }
         self.builder.finish_node();
     }
-}
 
-pub fn parse(code: &str) -> SyntaxNode {
-    Parser::new(code).parse()
+    fn skip_whitespace(&mut self) {
+        let start = self.pos;
+        while self.pos < self.code.len() {
+            let ch = self.code[self.pos..].chars().next().unwrap();
+            if ch.is_whitespace() {
+                self.pos += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if self.pos > start {
+            self.builder
+                .token(SyntaxKind::Whitespace.into(), &self.code[start..self.pos]);
+        }
+    }
+
+    fn looking_at(&self, s: &str) -> bool {
+        self.code[self.pos..].starts_with(s)
+    }
+
+    fn looking_at_ident_start(&self) -> bool {
+        self.code[self.pos..]
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_alphabetic() || c == '_')
+    }
+
+    fn looking_at_number(&self) -> bool {
+        self.code[self.pos..]
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_ascii_digit())
+    }
+
+    fn consume_char(&mut self, ch: char) -> bool {
+        if self.code[self.pos..].starts_with(ch) {
+            let kind = match ch {
+                '=' => SyntaxKind::Eq,
+                ';' => SyntaxKind::Semicolon,
+                '.' => SyntaxKind::Dot,
+                '+' => SyntaxKind::Plus,
+                '*' => SyntaxKind::Star,
+                '{' => SyntaxKind::LCurly,
+                '}' => SyntaxKind::RCurly,
+                _ => SyntaxKind::Error,
+            };
+            self.builder.token(kind.into(), &ch.to_string());
+            self.pos += ch.len_utf8();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_keyword(&mut self, kw: &str, kind: SyntaxKind) {
+        if self.looking_at(kw) {
+            self.builder.token(kind.into(), kw);
+            self.pos += kw.len();
+        }
+    }
+
+    fn consume_ident_str(&mut self) -> Option<&'a str> {
+        let start = self.pos;
+        let mut chars = self.code[self.pos..].chars();
+        if let Some(first) = chars.next() {
+            if first.is_alphabetic() || first == '_' {
+                self.pos += first.len_utf8();
+                while let Some(ch) = chars.next() {
+                    if ch.is_alphanumeric() || ch == '_' {
+                        self.pos += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                return Some(&self.code[start..self.pos]);
+            }
+        }
+        None
+    }
+
+    fn consume_number(&mut self) -> &'a str {
+        let start = self.pos;
+        while self.pos < self.code.len() {
+            let ch = self.code[self.pos..].chars().next().unwrap();
+            if ch.is_ascii_digit() {
+                self.pos += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        &self.code[start..self.pos]
+    }
 }

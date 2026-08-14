@@ -1,50 +1,63 @@
 use crate::parser::{SyntaxKind, SyntaxNode, SyntaxToken};
+use rowan::TextRange;
 
-pub trait AstNode: Sized {
-    fn syntax(&self) -> &SyntaxNode;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IdentToken(pub(crate) SyntaxToken);
+
+impl IdentToken {
+    #[inline]
+    pub fn text(&self) -> &str {
+        self.0.text()
+    }
 }
 
 macro_rules! ast_node {
     ($name:ident, $kind:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-        pub struct $name(pub SyntaxNode);
-
-        impl AstNode for $name {
-            #[inline]
-            fn syntax(&self) -> &SyntaxNode {
-                &self.0
-            }
-        }
+        pub struct $name(pub(crate) SyntaxNode);
 
         impl $name {
             #[inline]
             #[allow(dead_code)]
-            pub fn cast(node: SyntaxNode) -> Option<Self> {
+            fn cast(node: SyntaxNode) -> Option<Self> {
                 if node.kind() == SyntaxKind::$kind {
                     Some(Self(node))
                 } else {
                     None
                 }
             }
+
+            #[inline]
+            #[allow(dead_code)]
+            pub fn text_range(&self) -> TextRange {
+                self.0.text_range()
+            }
         }
     };
 }
 
-ast_node!(ScopeDef, SCOPE_DEF);
-ast_node!(BlockExpr, BLOCK_EXPR);
-ast_node!(LetStmt, LET_STMT);
-ast_node!(ImportStmt, IMPORT_STMT);
-ast_node!(NameRef, NAME_REF);
+ast_node!(Name, Name);
+ast_node!(ScopeDef, ScopeDef);
+ast_node!(BlockExpr, BlockExpr);
+ast_node!(LetStmt, LetStmt);
+ast_node!(ImportStmt, ImportStmt);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SourceFile(pub SyntaxNode);
+impl Name {
+    pub fn ident_token(&self) -> Option<IdentToken> {
+        self.0
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == SyntaxKind::Ident)
+            .map(IdentToken)
+    }
 
-impl AstNode for SourceFile {
-    #[inline]
-    fn syntax(&self) -> &SyntaxNode {
-        &self.0
+    pub fn text(&self) -> String {
+        self.ident_token().unwrap().text().into()
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceFile(pub(crate) SyntaxNode);
 
 impl SourceFile {
     pub fn cast(node: SyntaxNode) -> Self {
@@ -57,33 +70,48 @@ impl SourceFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PathNode(pub SyntaxNode);
-
-impl AstNode for PathNode {
-    #[inline]
-    fn syntax(&self) -> &SyntaxNode {
-        &self.0
-    }
-}
+pub struct PathNode(pub(crate) SyntaxNode);
 
 impl PathNode {
-    pub fn cast(node: SyntaxNode) -> Option<Self> {
-        if node.kind() == SyntaxKind::PATH || node.kind() == SyntaxKind::NAME_REF {
+    pub(crate) fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == SyntaxKind::Path || node.kind() == SyntaxKind::NameRef {
             Some(Self(node))
         } else {
             None
         }
     }
 
-    pub fn segments(&self) -> impl Iterator<Item = SyntaxToken> {
+    #[inline]
+    pub fn text_range(&self) -> TextRange {
+        self.0.text_range()
+    }
+
+    pub fn segments(&self) -> impl Iterator<Item = IdentToken> {
         self.0
             .descendants_with_tokens()
             .filter_map(|e| e.into_token())
-            .filter(|t| t.kind() == SyntaxKind::IDENT)
+            .filter(|t| t.kind() == SyntaxKind::Ident)
+            .map(IdentToken)
     }
 
-    pub fn last_segment(&self) -> Option<SyntaxToken> {
+    pub fn last_segment(&self) -> Option<IdentToken> {
         self.segments().last()
+    }
+
+    pub fn text(&self) -> String {
+        self.segments()
+            .map(|t| t.text().to_string())
+            .collect::<Vec<_>>()
+            .join("::")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnparsedStmt(pub(crate) SyntaxNode);
+
+impl UnparsedStmt {
+    pub fn children(&self) -> impl Iterator<Item = Stmt> {
+        self.0.children().map(Stmt::cast)
     }
 }
 
@@ -93,39 +121,26 @@ pub enum Stmt {
     Block(BlockExpr),
     Let(LetStmt),
     Import(ImportStmt),
-    NameRef(NameRef),
-    Other(SyntaxNode),
-}
-
-impl AstNode for Stmt {
-    fn syntax(&self) -> &SyntaxNode {
-        match self {
-            Stmt::ScopeDef(n) => n.syntax(),
-            Stmt::Block(n) => n.syntax(),
-            Stmt::Let(n) => n.syntax(),
-            Stmt::Import(n) => n.syntax(),
-            Stmt::NameRef(n) => n.syntax(),
-            Stmt::Other(n) => n,
-        }
-    }
+    Path(PathNode),
+    Other(UnparsedStmt),
 }
 
 impl Stmt {
-    pub fn cast(node: SyntaxNode) -> Self {
+    pub(crate) fn cast(node: SyntaxNode) -> Self {
         match node.kind() {
-            SyntaxKind::SCOPE_DEF => Stmt::ScopeDef(ScopeDef(node)),
-            SyntaxKind::BLOCK_EXPR => Stmt::Block(BlockExpr(node)),
-            SyntaxKind::LET_STMT => Stmt::Let(LetStmt(node)),
-            SyntaxKind::IMPORT_STMT => Stmt::Import(ImportStmt(node)),
-            SyntaxKind::NAME_REF => Stmt::NameRef(NameRef(node)),
-            _ => Stmt::Other(node),
+            SyntaxKind::ScopeDef => Stmt::ScopeDef(ScopeDef(node)),
+            SyntaxKind::BlockExpr => Stmt::Block(BlockExpr(node)),
+            SyntaxKind::LetStmt => Stmt::Let(LetStmt(node)),
+            SyntaxKind::ImportStmt => Stmt::Import(ImportStmt(node)),
+            SyntaxKind::Path | SyntaxKind::NameRef => Stmt::Path(PathNode(node)),
+            _ => Stmt::Other(UnparsedStmt(node)),
         }
     }
 }
 
 impl ScopeDef {
-    pub fn name_node(&self) -> Option<NameRef> {
-        self.0.children().find_map(NameRef::cast)
+    pub fn name_node(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
     }
 
     pub fn block(&self) -> Option<BlockExpr> {
@@ -140,15 +155,15 @@ impl BlockExpr {
 }
 
 impl LetStmt {
-    pub fn name_node(&self) -> Option<NameRef> {
-        self.0.children().find_map(NameRef::cast)
+    pub fn name_node(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
     }
 
     pub fn initializer(&self) -> impl Iterator<Item = Stmt> {
-        let name_node = self.name_node().map(|n| n.0);
+        let name_syntax = self.name_node().map(|n| n.0);
         self.0
             .children()
-            .filter(move |child| Some(child) != name_node.as_ref())
+            .filter(move |child| Some(child) != name_syntax.as_ref())
             .map(Stmt::cast)
     }
 }
@@ -156,14 +171,5 @@ impl LetStmt {
 impl ImportStmt {
     pub fn path(&self) -> Option<PathNode> {
         self.0.children().find_map(PathNode::cast)
-    }
-}
-
-impl NameRef {
-    pub fn ident_token(&self) -> Option<SyntaxToken> {
-        self.0
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == SyntaxKind::IDENT)
     }
 }

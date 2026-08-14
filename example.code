@@ -10,12 +10,11 @@ scope math {
 scope calculation {
     import global_val;
     import math.constants;
-    import constants.factor;
 
-    let intermediate = global_val * factor;
+    let intermediate = global_val * constants.factor;
 
     {
-        import constants.offset;
-        let total = intermediate + offset;
+        let intermediate = intermediate + 1;
+        let total = intermediate + constants.offset;
     }
 }

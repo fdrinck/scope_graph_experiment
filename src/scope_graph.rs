@@ -1,8 +1,6 @@
-use std::collections::HashMap;
 use string_interner::{DefaultBackend, DefaultSymbol, StringInterner};
 
-use crate::ast::{AstNode, NameRef, PathNode, SourceFile, Stmt};
-use crate::parser::{SyntaxKind, SyntaxNode};
+use crate::ast::{Name, PathNode, SourceFile, Stmt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScopeId(pub u32);
@@ -18,36 +16,36 @@ pub struct ImportId(pub u32);
 
 pub type NameId = DefaultSymbol;
 
+#[derive(Debug, Clone)]
+pub enum ScopeKind {
+    Plain,
+    Decl(DeclId, NameId),
+    Import(ImportId, NameId),
+}
+
 #[derive(Debug)]
 pub struct Scope {
     pub parent: Option<ScopeId>,
+    pub kind: ScopeKind,
 }
 
 #[derive(Debug)]
 pub struct Declaration {
     pub scope: ScopeId,
-    pub node: SyntaxNode,
+    pub node: Name,
     pub child_scope: Option<ScopeId>,
 }
 
 #[derive(Debug)]
 pub struct Reference {
     pub scope: ScopeId,
-    pub node: SyntaxNode,
+    pub node: PathNode,
 }
 
 #[derive(Debug)]
 pub struct Import {
-    pub path_node: SyntaxNode,
+    pub path_node: PathNode,
 }
-
-#[derive(Debug, Default)]
-struct Binding {
-    decl: Option<DeclId>,
-    import: Option<ImportId>,
-}
-
-type BindingKey = (ScopeId, NameId);
 
 #[derive(Clone, Copy)]
 struct VisitNode<'a> {
@@ -76,7 +74,6 @@ pub struct ScopeGraph {
     references: Vec<Reference>,
     imports: Vec<Import>,
     names: StringInterner<DefaultBackend>,
-    bindings: HashMap<BindingKey, Binding>,
 }
 
 impl ScopeGraph {
@@ -87,12 +84,12 @@ impl ScopeGraph {
             references: Vec::with_capacity(32),
             imports: Vec::with_capacity(16),
             names: StringInterner::default(),
-            bindings: HashMap::with_capacity(64),
         };
 
-        let root_scope = graph.add_scope(None);
+        let root_scope = graph.add_scope(None, ScopeKind::Plain);
+        let mut current_scope = root_scope;
         for stmt in file.statements() {
-            graph.walk_stmt(&stmt, root_scope);
+            current_scope = graph.walk_stmt(&stmt, current_scope);
         }
         graph
     }
@@ -127,150 +124,118 @@ impl ScopeGraph {
         self.imports.len()
     }
 
-    fn add_scope(&mut self, parent: Option<ScopeId>) -> ScopeId {
+    fn add_scope(&mut self, parent: Option<ScopeId>, kind: ScopeKind) -> ScopeId {
         let id = ScopeId(self.scopes.len() as u32);
-        self.scopes.push(Scope { parent });
+        self.scopes.push(Scope { parent, kind });
         id
     }
 
     fn add_decl(
         &mut self,
-        scope: ScopeId,
-        name_ref: NameRef,
+        current_scope: ScopeId,
+        name: Name,
         child_scope: Option<ScopeId>,
-    ) -> DeclId {
-        let id = DeclId(self.declarations.len() as u32);
+    ) -> (DeclId, ScopeId) {
+        let decl_id = DeclId(self.declarations.len() as u32);
 
-        if let Some(token) = name_ref.ident_token() {
+        let next_scope = if let Some(token) = name.ident_token() {
             let name_id = self.names.get_or_intern(token.text());
-            self.bindings.entry((scope, name_id)).or_default().decl = Some(id);
-        }
+            self.add_scope(Some(current_scope), ScopeKind::Decl(decl_id, name_id))
+        } else {
+            current_scope
+        };
 
         self.declarations.push(Declaration {
-            scope,
-            node: name_ref.0,
+            scope: next_scope,
+            node: name,
             child_scope,
         });
-        id
+
+        (decl_id, next_scope)
     }
 
-    fn add_ref(&mut self, scope: ScopeId, name_ref: NameRef) -> RefId {
+    fn add_ref(&mut self, scope: ScopeId, path: PathNode) -> RefId {
         let id = RefId(self.references.len() as u32);
-        self.references.push(Reference {
-            scope,
-            node: name_ref.0,
-        });
+        self.references.push(Reference { scope, node: path });
         id
     }
 
-    fn add_import(&mut self, scope: ScopeId, path: PathNode) -> ImportId {
-        let id = ImportId(self.imports.len() as u32);
+    fn add_import(&mut self, current_scope: ScopeId, path: PathNode) -> (ImportId, ScopeId) {
+        let import_id = ImportId(self.imports.len() as u32);
 
-        if let Some(token) = path.last_segment() {
+        let next_scope = if let Some(token) = path.last_segment() {
             let name_id = self.names.get_or_intern(token.text());
-            self.bindings.entry((scope, name_id)).or_default().import = Some(id);
-        }
+            self.add_scope(Some(current_scope), ScopeKind::Import(import_id, name_id))
+        } else {
+            current_scope
+        };
 
-        self.imports.push(Import { path_node: path.0 });
-        id
+        self.imports.push(Import { path_node: path });
+
+        (import_id, next_scope)
     }
 
-    fn walk_stmt(&mut self, stmt: &Stmt, current_scope: ScopeId) {
+    fn walk_stmt(&mut self, stmt: &Stmt, current_scope: ScopeId) -> ScopeId {
         match stmt {
             Stmt::ScopeDef(def) => {
-                let named_scope = self.add_scope(Some(current_scope));
+                let body_head_scope = self.add_scope(Some(current_scope), ScopeKind::Plain);
 
-                if let Some(name) = def.name_node() {
-                    self.add_decl(current_scope, name, Some(named_scope));
-                }
-
+                let mut body_tail_scope = body_head_scope;
                 if let Some(block) = def.block() {
                     for child_stmt in block.statements() {
-                        self.walk_stmt(&child_stmt, named_scope);
+                        body_tail_scope = self.walk_stmt(&child_stmt, body_tail_scope);
                     }
+                }
+
+                if let Some(name) = def.name_node() {
+                    let (_decl_id, next_scope) =
+                        self.add_decl(current_scope, name, Some(body_tail_scope));
+                    next_scope
+                } else {
+                    current_scope
                 }
             }
             Stmt::Block(block) => {
-                let anon_scope = self.add_scope(Some(current_scope));
-
+                let block_head_scope = self.add_scope(Some(current_scope), ScopeKind::Plain);
+                let mut block_tail_scope = block_head_scope;
                 for child_stmt in block.statements() {
-                    self.walk_stmt(&child_stmt, anon_scope);
+                    block_tail_scope = self.walk_stmt(&child_stmt, block_tail_scope);
                 }
+                current_scope
             }
             Stmt::Let(let_stmt) => {
-                if let Some(name) = let_stmt.name_node() {
-                    self.add_decl(current_scope, name, None);
+                let mut init_scope = current_scope;
+                for init_stmt in let_stmt.initializer() {
+                    init_scope = self.walk_stmt(&init_stmt, init_scope);
                 }
 
-                for init_stmt in let_stmt.initializer() {
-                    self.walk_stmt(&init_stmt, current_scope);
+                if let Some(name) = let_stmt.name_node() {
+                    let (_decl_id, next_scope) = self.add_decl(current_scope, name, None);
+                    next_scope
+                } else {
+                    current_scope
                 }
             }
             Stmt::Import(import_stmt) => {
                 if let Some(path) = import_stmt.path() {
-                    self.add_import(current_scope, path);
+                    let (_import_id, next_scope) = self.add_import(current_scope, path);
+                    next_scope
+                } else {
+                    current_scope
                 }
             }
-            Stmt::NameRef(name_ref) => {
-                let node = stmt.syntax();
-                let parent_kind = node.parent().map(|p| p.kind());
-
-                if parent_kind != Some(SyntaxKind::PATH)
-                    && parent_kind != Some(SyntaxKind::SCOPE_DEF)
-                {
-                    self.add_ref(current_scope, name_ref.clone());
+            Stmt::Path(path) => {
+                self.add_ref(current_scope, path.clone());
+                current_scope
+            }
+            Stmt::Other(unparsed) => {
+                let mut inner_scope = current_scope;
+                for child_stmt in unparsed.children() {
+                    inner_scope = self.walk_stmt(&child_stmt, inner_scope);
                 }
-            }
-            Stmt::Other(node) => {
-                for child in node.children() {
-                    self.walk_stmt(&Stmt::cast(child), current_scope);
-                }
+                inner_scope
             }
         }
-    }
-
-    #[inline]
-    fn binding(&self, scope: ScopeId, name: NameId) -> Option<&Binding> {
-        self.bindings.get(&(scope, name))
-    }
-
-    #[inline]
-    fn lookup_local(&self, scope: ScopeId, name: NameId) -> Option<DeclId> {
-        self.binding(scope, name).and_then(|b| b.decl)
-    }
-
-    #[inline]
-    fn lookup_import(&self, scope: ScopeId, name: NameId) -> Option<ImportId> {
-        self.binding(scope, name).and_then(|b| b.import)
-    }
-
-    fn resolve_symbol_in_scope<'a>(
-        &self,
-        scope: ScopeId,
-        name: NameId,
-        visited: Option<&'a VisitNode<'a>>,
-    ) -> Option<DeclId> {
-        if let Some(decl_id) = self.lookup_local(scope, name) {
-            return Some(decl_id);
-        }
-
-        if let Some(import_id) = self.lookup_import(scope, name) {
-            if visited.map_or(false, |v| v.contains(import_id)) {
-                return None;
-            }
-
-            let node = VisitNode {
-                import_id,
-                prev: visited,
-            };
-
-            let import = &self.imports[import_id.0 as usize];
-            if let Some(path) = PathNode::cast(import.path_node.clone()) {
-                return self.resolve_path_with_visited(scope, &path, Some(&node));
-            }
-        }
-
-        None
     }
 
     fn lookup_symbol_id<'a>(
@@ -282,10 +247,37 @@ impl ScopeGraph {
         let mut current = Some(start_scope);
 
         while let Some(scope_id) = current {
-            if let Some(decl_id) = self.resolve_symbol_in_scope(scope_id, name, visited) {
-                return Some(decl_id);
+            let scope = &self.scopes[scope_id.0 as usize];
+            match scope.kind {
+                ScopeKind::Decl(decl_id, decl_name) => {
+                    if decl_name == name {
+                        return Some(decl_id);
+                    }
+                }
+                ScopeKind::Import(import_id, import_name) => {
+                    if import_name == name {
+                        if !visited.map_or(false, |v| v.contains(import_id)) {
+                            let node = VisitNode {
+                                import_id,
+                                prev: visited,
+                            };
+
+                            let import = &self.imports[import_id.0 as usize];
+                            if let Some(import_parent) = scope.parent {
+                                if let Some(decl_id) = self.resolve_path_with_visited(
+                                    import_parent,
+                                    &import.path_node,
+                                    Some(&node),
+                                ) {
+                                    return Some(decl_id);
+                                }
+                            }
+                        }
+                    }
+                }
+                ScopeKind::Plain => {}
             }
-            current = self.scopes[scope_id.0 as usize].parent;
+            current = scope.parent;
         }
 
         None
@@ -308,7 +300,7 @@ impl ScopeGraph {
             let decl = &self.declarations[current_decl.0 as usize];
             let child_scope = decl.child_scope?;
 
-            current_decl = self.resolve_symbol_in_scope(child_scope, name, visited)?;
+            current_decl = self.lookup_symbol_id(child_scope, name, visited)?;
         }
 
         Some(current_decl)
@@ -320,7 +312,6 @@ impl ScopeGraph {
 
     pub fn resolve(&self, ref_id: RefId) -> Option<DeclId> {
         let reference = &self.references[ref_id.0 as usize];
-        let path = PathNode::cast(reference.node.clone())?;
-        self.resolve_path(reference.scope, &path)
+        self.resolve_path(reference.scope, &reference.node)
     }
 }
