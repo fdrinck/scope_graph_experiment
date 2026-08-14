@@ -49,6 +49,26 @@ struct Binding {
 
 type BindingKey = (ScopeId, NameId);
 
+#[derive(Clone, Copy)]
+struct VisitNode<'a> {
+    import_id: ImportId,
+    prev: Option<&'a VisitNode<'a>>,
+}
+
+impl<'a> VisitNode<'a> {
+    #[inline]
+    fn contains(&self, id: ImportId) -> bool {
+        let mut curr = Some(self);
+        while let Some(node) = curr {
+            if node.import_id == id {
+                return true;
+            }
+            curr = node.prev;
+        }
+        false
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ScopeGraph {
     scopes: Vec<Scope>,
@@ -224,26 +244,45 @@ impl ScopeGraph {
         self.binding(scope, name).and_then(|b| b.import)
     }
 
-    fn resolve_symbol_in_scope(&self, scope: ScopeId, name: NameId) -> Option<DeclId> {
+    fn resolve_symbol_in_scope<'a>(
+        &self,
+        scope: ScopeId,
+        name: NameId,
+        visited: Option<&'a VisitNode<'a>>,
+    ) -> Option<DeclId> {
         if let Some(decl_id) = self.lookup_local(scope, name) {
             return Some(decl_id);
         }
 
         if let Some(import_id) = self.lookup_import(scope, name) {
+            if visited.map_or(false, |v| v.contains(import_id)) {
+                return None;
+            }
+
+            let node = VisitNode {
+                import_id,
+                prev: visited,
+            };
+
             let import = &self.imports[import_id.0 as usize];
             if let Some(path) = PathNode::cast(import.path_node.clone()) {
-                return self.resolve_path(ScopeId(0), &path);
+                return self.resolve_path_with_visited(scope, &path, Some(&node));
             }
         }
 
         None
     }
 
-    fn lookup_symbol_id(&self, start_scope: ScopeId, name: NameId) -> Option<DeclId> {
+    fn lookup_symbol_id<'a>(
+        &self,
+        start_scope: ScopeId,
+        name: NameId,
+        visited: Option<&'a VisitNode<'a>>,
+    ) -> Option<DeclId> {
         let mut current = Some(start_scope);
 
         while let Some(scope_id) = current {
-            if let Some(decl_id) = self.resolve_symbol_in_scope(scope_id, name) {
+            if let Some(decl_id) = self.resolve_symbol_in_scope(scope_id, name, visited) {
                 return Some(decl_id);
             }
             current = self.scopes[scope_id.0 as usize].parent;
@@ -252,22 +291,31 @@ impl ScopeGraph {
         None
     }
 
-    pub fn resolve_path(&self, start_scope: ScopeId, path: &PathNode) -> Option<DeclId> {
+    fn resolve_path_with_visited<'a>(
+        &self,
+        start_scope: ScopeId,
+        path: &PathNode,
+        visited: Option<&'a VisitNode<'a>>,
+    ) -> Option<DeclId> {
         let mut segments = path.segments();
 
         let first = segments.next()?;
         let first_name = self.names.get(first.text())?;
-        let mut current_decl = self.lookup_symbol_id(start_scope, first_name)?;
+        let mut current_decl = self.lookup_symbol_id(start_scope, first_name, visited)?;
 
         for token in segments {
             let name = self.names.get(token.text())?;
             let decl = &self.declarations[current_decl.0 as usize];
             let child_scope = decl.child_scope?;
 
-            current_decl = self.resolve_symbol_in_scope(child_scope, name)?;
+            current_decl = self.resolve_symbol_in_scope(child_scope, name, visited)?;
         }
 
         Some(current_decl)
+    }
+
+    pub fn resolve_path(&self, start_scope: ScopeId, path: &PathNode) -> Option<DeclId> {
+        self.resolve_path_with_visited(start_scope, path, None)
     }
 
     pub fn resolve(&self, ref_id: RefId) -> Option<DeclId> {

@@ -18,6 +18,7 @@ macro_rules! ast_node {
 
         impl $name {
             #[inline]
+            #[allow(dead_code)]
             pub fn cast(node: SyntaxNode) -> Option<Self> {
                 if node.kind() == SyntaxKind::$kind {
                     Some(Self(node))
@@ -112,11 +113,11 @@ impl AstNode for Stmt {
 impl Stmt {
     pub fn cast(node: SyntaxNode) -> Self {
         match node.kind() {
-            SyntaxKind::SCOPE_DEF => Stmt::ScopeDef(ScopeDef::cast(node).unwrap()),
-            SyntaxKind::BLOCK_EXPR => Stmt::Block(BlockExpr::cast(node).unwrap()),
-            SyntaxKind::LET_STMT => Stmt::Let(LetStmt::cast(node).unwrap()),
-            SyntaxKind::IMPORT_STMT => Stmt::Import(ImportStmt::cast(node).unwrap()),
-            SyntaxKind::NAME_REF => Stmt::NameRef(NameRef::cast(node).unwrap()),
+            SyntaxKind::SCOPE_DEF => Stmt::ScopeDef(ScopeDef(node)),
+            SyntaxKind::BLOCK_EXPR => Stmt::Block(BlockExpr(node)),
+            SyntaxKind::LET_STMT => Stmt::Let(LetStmt(node)),
+            SyntaxKind::IMPORT_STMT => Stmt::Import(ImportStmt(node)),
+            SyntaxKind::NAME_REF => Stmt::NameRef(NameRef(node)),
             _ => Stmt::Other(node),
         }
     }
@@ -143,16 +144,12 @@ impl LetStmt {
         self.0.children().find_map(NameRef::cast)
     }
 
-    /// Yields statement/expression nodes in the initializer (skipping the declared name).
     pub fn initializer(&self) -> impl Iterator<Item = Stmt> {
-        let name_syntax = self.name_node().map(|n| n.0);
-        self.0.children().filter_map(move |child| {
-            if Some(&child) == name_syntax.as_ref() {
-                None
-            } else {
-                Some(Stmt::cast(child))
-            }
-        })
+        let name_node = self.name_node().map(|n| n.0);
+        self.0
+            .children()
+            .filter(move |child| Some(child) != name_node.as_ref())
+            .map(Stmt::cast)
     }
 }
 
