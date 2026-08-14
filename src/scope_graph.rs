@@ -16,7 +16,7 @@ pub struct ImportId(pub u32);
 
 pub type NameId = DefaultSymbol;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ScopeKind {
     Plain,
     Decl(DeclId, NameId),
@@ -34,6 +34,7 @@ pub struct Declaration {
     pub scope: ScopeId,
     pub node: Name,
     pub child_scope: Option<ScopeId>,
+    pub child_head_scope: Option<ScopeId>,
 }
 
 #[derive(Debug)]
@@ -79,7 +80,7 @@ pub struct ScopeGraph {
 impl ScopeGraph {
     pub fn build(file: &SourceFile) -> Self {
         let mut graph = ScopeGraph {
-            scopes: Vec::with_capacity(16),
+            scopes: Vec::with_capacity(32),
             declarations: Vec::with_capacity(32),
             references: Vec::with_capacity(32),
             imports: Vec::with_capacity(16),
@@ -124,6 +125,7 @@ impl ScopeGraph {
         self.imports.len()
     }
 
+    #[inline]
     fn add_scope(&mut self, parent: Option<ScopeId>, kind: ScopeKind) -> ScopeId {
         let id = ScopeId(self.scopes.len() as u32);
         self.scopes.push(Scope { parent, kind });
@@ -135,6 +137,7 @@ impl ScopeGraph {
         current_scope: ScopeId,
         name: Name,
         child_scope: Option<ScopeId>,
+        child_head_scope: Option<ScopeId>,
     ) -> (DeclId, ScopeId) {
         let decl_id = DeclId(self.declarations.len() as u32);
 
@@ -149,6 +152,7 @@ impl ScopeGraph {
             scope: next_scope,
             node: name,
             child_scope,
+            child_head_scope,
         });
 
         (decl_id, next_scope)
@@ -188,8 +192,12 @@ impl ScopeGraph {
                 }
 
                 if let Some(name) = def.name_node() {
-                    let (_decl_id, next_scope) =
-                        self.add_decl(current_scope, name, Some(body_tail_scope));
+                    let (_decl_id, next_scope) = self.add_decl(
+                        current_scope,
+                        name,
+                        Some(body_tail_scope),
+                        Some(body_head_scope),
+                    );
                     next_scope
                 } else {
                     current_scope
@@ -210,7 +218,7 @@ impl ScopeGraph {
                 }
 
                 if let Some(name) = let_stmt.name_node() {
-                    let (_decl_id, next_scope) = self.add_decl(current_scope, name, None);
+                    let (_decl_id, next_scope) = self.add_decl(current_scope, name, None, None);
                     next_scope
                 } else {
                     current_scope
@@ -244,10 +252,21 @@ impl ScopeGraph {
         name: NameId,
         visited: Option<&'a VisitNode<'a>>,
     ) -> Option<DeclId> {
-        let mut current = Some(start_scope);
+        self.lookup_symbol_bounded(start_scope, name, None, visited)
+    }
 
-        while let Some(scope_id) = current {
+    fn lookup_symbol_bounded<'a>(
+        &self,
+        start_scope: ScopeId,
+        name: NameId,
+        stop_at: Option<ScopeId>,
+        visited: Option<&'a VisitNode<'a>>,
+    ) -> Option<DeclId> {
+        let mut curr = Some(start_scope);
+
+        while let Some(scope_id) = curr {
             let scope = &self.scopes[scope_id.0 as usize];
+
             match scope.kind {
                 ScopeKind::Decl(decl_id, decl_name) => {
                     if decl_name == name {
@@ -256,31 +275,43 @@ impl ScopeGraph {
                 }
                 ScopeKind::Import(import_id, import_name) => {
                     if import_name == name {
-                        if !visited.map_or(false, |v| v.contains(import_id)) {
-                            let node = VisitNode {
-                                import_id,
-                                prev: visited,
-                            };
-
-                            let import = &self.imports[import_id.0 as usize];
-                            if let Some(import_parent) = scope.parent {
-                                if let Some(decl_id) = self.resolve_path_with_visited(
-                                    import_parent,
-                                    &import.path_node,
-                                    Some(&node),
-                                ) {
-                                    return Some(decl_id);
-                                }
-                            }
+                        if let Some(decl_id) = self.resolve_import(import_id, scope.parent, visited)
+                        {
+                            return Some(decl_id);
                         }
                     }
                 }
                 ScopeKind::Plain => {}
             }
-            current = scope.parent;
+
+            if Some(scope_id) == stop_at {
+                break;
+            }
+
+            curr = scope.parent;
         }
 
         None
+    }
+
+    fn resolve_import<'a>(
+        &self,
+        import_id: ImportId,
+        parent_scope: Option<ScopeId>,
+        visited: Option<&'a VisitNode<'a>>,
+    ) -> Option<DeclId> {
+        if visited.map_or(false, |v| v.contains(import_id)) {
+            return None;
+        }
+
+        let parent_scope = parent_scope?;
+        let import = &self.imports[import_id.0 as usize];
+        let visit_node = VisitNode {
+            import_id,
+            prev: visited,
+        };
+
+        self.resolve_path_with_visited(parent_scope, &import.path_node, Some(&visit_node))
     }
 
     fn resolve_path_with_visited<'a>(
@@ -298,9 +329,15 @@ impl ScopeGraph {
         for token in segments {
             let name = self.names.get(token.text())?;
             let decl = &self.declarations[current_decl.0 as usize];
-            let child_scope = decl.child_scope?;
+            let child_tail_scope = decl.child_scope?;
+            let child_head_scope = decl.child_head_scope?;
 
-            current_decl = self.lookup_symbol_id(child_scope, name, visited)?;
+            current_decl = self.lookup_symbol_bounded(
+                child_tail_scope,
+                name,
+                Some(child_head_scope),
+                visited,
+            )?;
         }
 
         Some(current_decl)

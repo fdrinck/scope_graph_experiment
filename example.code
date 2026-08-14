@@ -12,7 +12,6 @@ scope calculation {
     import math.constants;
 
     let intermediate = global_val * constants.factor;
-
     {
         let intermediate = intermediate + 1;
         let total = intermediate + constants.offset;
