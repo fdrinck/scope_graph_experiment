@@ -76,7 +76,7 @@ impl PathNode {
 
     pub fn segments(&self) -> impl Iterator<Item = SyntaxToken> {
         self.0
-            .children_with_tokens()
+            .descendants_with_tokens()
             .filter_map(|e| e.into_token())
             .filter(|t| t.kind() == SyntaxKind::IDENT)
     }
@@ -143,8 +143,16 @@ impl LetStmt {
         self.0.children().find_map(NameRef::cast)
     }
 
-    pub fn children(&self) -> impl Iterator<Item = Stmt> {
-        self.0.children().map(Stmt::cast)
+    /// Yields statement/expression nodes in the initializer (skipping the declared name).
+    pub fn initializer(&self) -> impl Iterator<Item = Stmt> {
+        let name_syntax = self.name_node().map(|n| n.0);
+        self.0.children().filter_map(move |child| {
+            if Some(&child) == name_syntax.as_ref() {
+                None
+            } else {
+                Some(Stmt::cast(child))
+            }
+        })
     }
 }
 
@@ -157,7 +165,7 @@ impl ImportStmt {
 impl NameRef {
     pub fn ident_token(&self) -> Option<SyntaxToken> {
         self.0
-            .children_with_tokens()
+            .descendants_with_tokens()
             .filter_map(|e| e.into_token())
             .find(|t| t.kind() == SyntaxKind::IDENT)
     }

@@ -3,8 +3,8 @@
 Code experiment related to the concepts discussed
 [here](https://pl.ewi.tudelft.nl/research/projects/scope-graphs/).
 
-The toy language example is contained in `example.code`. All names are resolved
-except for `offset` which has no suitable definition to resolve to.
+A toy language example is contained in `example.code`. Running `cargo run --
+example.code` will show how the names have been resolved.
 
 The import identifiers are not elaborated to explicit scopes but are resolved on
 the fly by resolving the scope references one after another and then using the

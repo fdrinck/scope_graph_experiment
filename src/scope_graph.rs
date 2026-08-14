@@ -21,7 +21,6 @@ pub type NameId = DefaultSymbol;
 #[derive(Debug)]
 pub struct Scope {
     pub parent: Option<ScopeId>,
-    pub enclosing: Option<ScopeId>,
 }
 
 #[derive(Debug)]
@@ -71,7 +70,7 @@ impl ScopeGraph {
             bindings: HashMap::with_capacity(64),
         };
 
-        let root_scope = graph.add_scope(None, None);
+        let root_scope = graph.add_scope(None);
         for stmt in file.statements() {
             graph.walk_stmt(&stmt, root_scope);
         }
@@ -108,9 +107,9 @@ impl ScopeGraph {
         self.imports.len()
     }
 
-    fn add_scope(&mut self, parent: Option<ScopeId>, enclosing: Option<ScopeId>) -> ScopeId {
+    fn add_scope(&mut self, parent: Option<ScopeId>) -> ScopeId {
         let id = ScopeId(self.scopes.len() as u32);
-        self.scopes.push(Scope { parent, enclosing });
+        self.scopes.push(Scope { parent });
         id
     }
 
@@ -159,7 +158,7 @@ impl ScopeGraph {
     fn walk_stmt(&mut self, stmt: &Stmt, current_scope: ScopeId) {
         match stmt {
             Stmt::ScopeDef(def) => {
-                let named_scope = self.add_scope(None, Some(current_scope));
+                let named_scope = self.add_scope(Some(current_scope));
 
                 if let Some(name) = def.name_node() {
                     self.add_decl(current_scope, name, Some(named_scope));
@@ -172,7 +171,7 @@ impl ScopeGraph {
                 }
             }
             Stmt::Block(block) => {
-                let anon_scope = self.add_scope(Some(current_scope), Some(current_scope));
+                let anon_scope = self.add_scope(Some(current_scope));
 
                 for child_stmt in block.statements() {
                     self.walk_stmt(&child_stmt, anon_scope);
@@ -183,8 +182,8 @@ impl ScopeGraph {
                     self.add_decl(current_scope, name, None);
                 }
 
-                for child_stmt in let_stmt.children() {
-                    self.walk_stmt(&child_stmt, current_scope);
+                for init_stmt in let_stmt.initializer() {
+                    self.walk_stmt(&init_stmt, current_scope);
                 }
             }
             Stmt::Import(import_stmt) => {
@@ -225,26 +224,29 @@ impl ScopeGraph {
         self.binding(scope, name).and_then(|b| b.import)
     }
 
+    fn resolve_symbol_in_scope(&self, scope: ScopeId, name: NameId) -> Option<DeclId> {
+        if let Some(decl_id) = self.lookup_local(scope, name) {
+            return Some(decl_id);
+        }
+
+        if let Some(import_id) = self.lookup_import(scope, name) {
+            let import = &self.imports[import_id.0 as usize];
+            if let Some(path) = PathNode::cast(import.path_node.clone()) {
+                return self.resolve_path(ScopeId(0), &path);
+            }
+        }
+
+        None
+    }
+
     fn lookup_symbol_id(&self, start_scope: ScopeId, name: NameId) -> Option<DeclId> {
         let mut current = Some(start_scope);
 
         while let Some(scope_id) = current {
-            let scope = &self.scopes[scope_id.0 as usize];
-
-            if let Some(decl_id) = self.lookup_local(scope_id, name) {
+            if let Some(decl_id) = self.resolve_symbol_in_scope(scope_id, name) {
                 return Some(decl_id);
             }
-
-            if let Some(import_id) = self.lookup_import(scope_id, name) {
-                let import = &self.imports[import_id.0 as usize];
-                let eval_scope = scope.enclosing.unwrap_or(scope_id);
-
-                if let Some(path) = PathNode::cast(import.path_node.clone()) {
-                    return self.resolve_path(eval_scope, &path);
-                }
-            }
-
-            current = scope.parent;
+            current = self.scopes[scope_id.0 as usize].parent;
         }
 
         None
@@ -262,7 +264,7 @@ impl ScopeGraph {
             let decl = &self.declarations[current_decl.0 as usize];
             let child_scope = decl.child_scope?;
 
-            current_decl = self.lookup_local(child_scope, name)?;
+            current_decl = self.resolve_symbol_in_scope(child_scope, name)?;
         }
 
         Some(current_decl)
