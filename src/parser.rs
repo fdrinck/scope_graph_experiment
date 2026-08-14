@@ -63,65 +63,76 @@ impl Language for Lang {
 pub type SyntaxNode = RowanSyntaxNode<Lang>;
 pub type SyntaxToken = RowanSyntaxToken<Lang>;
 
-struct Lexer<'a> {
-    input: &'a str,
+pub struct Lexer<'a> {
+    source: &'a str,
+    cursor: usize,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(input: &'a str) -> Self {
-        Self { input }
+    pub fn new(source: &'a str) -> Self {
+        Self { source, cursor: 0 }
     }
 
-    fn next_token(&mut self) -> Option<(SyntaxKind, &'a str)> {
-        if self.input.is_empty() {
+    /// Peeks the character at the current cursor position.
+    #[inline]
+    fn peek(&self) -> Option<char> {
+        self.source[self.cursor..].chars().next()
+    }
+
+    /// Consumes the current character and advances the cursor.
+    #[inline]
+    fn bump(&mut self) -> Option<char> {
+        let c = self.peek()?;
+        self.cursor += c.len_utf8();
+        Some(c)
+    }
+
+    /// Advances while `predicate` holds true.
+    #[inline]
+    fn eat_while(&mut self, mut predicate: impl FnMut(char) -> bool) {
+        while self.peek().is_some_and(&mut predicate) {
+            self.bump();
+        }
+    }
+
+    pub fn next_token(&mut self) -> Option<(SyntaxKind, &'a str)> {
+        if self.cursor >= self.source.len() {
             return None;
         }
 
-        let mut chars = self.input.char_indices();
-        let (_, c) = chars.next()?;
+        let start = self.cursor;
+        let first = self.bump()?;
 
-        let (kind, len) = match c {
+        let kind = match first {
             c if c.is_whitespace() => {
-                let len = self
-                    .input
-                    .find(|c: char| !c.is_whitespace())
-                    .unwrap_or(self.input.len());
-                (WHITESPACE, len)
+                self.eat_while(|c| c.is_whitespace());
+                WHITESPACE
             }
-            '+' => (PLUS, 1),
-            '-' => (MINUS, 1),
-            '*' => (STAR, 1),
-            '=' => (EQ, 1),
-            '.' => (DOT, 1),
-            ';' => (SEMICOLON, 1),
-            '{' => (L_CURLY, 1),
-            '}' => (R_CURLY, 1),
             '0'..='9' => {
-                let len = self
-                    .input
-                    .find(|c: char| !c.is_numeric())
-                    .unwrap_or(self.input.len());
-                (INT, len)
+                self.eat_while(|c| c.is_ascii_digit());
+                INT
             }
             'a'..='z' | 'A'..='Z' | '_' => {
-                let len = self
-                    .input
-                    .find(|c: char| !c.is_alphanumeric() && c != '_')
-                    .unwrap_or(self.input.len());
-                let text = &self.input[..len];
-                match text {
-                    "let" => (LET_KW, len),
-                    "scope" => (SCOPE_KW, len),
-                    "import" => (IMPORT_KW, len),
-                    _ => (IDENT, len),
+                self.eat_while(|c| c.is_alphanumeric() || c == '_');
+                match &self.source[start..self.cursor] {
+                    "let" => LET_KW,
+                    "scope" => SCOPE_KW,
+                    "import" => IMPORT_KW,
+                    _ => IDENT,
                 }
             }
-            _ => (ERROR, 1),
+            '+' => PLUS,
+            '-' => MINUS,
+            '*' => STAR,
+            '=' => EQ,
+            '.' => DOT,
+            ';' => SEMICOLON,
+            '{' => L_CURLY,
+            '}' => R_CURLY,
+            _ => ERROR,
         };
 
-        let (token_text, rest) = self.input.split_at(len);
-        self.input = rest;
-        Some((kind, token_text))
+        Some((kind, &self.source[start..self.cursor]))
     }
 }
 
