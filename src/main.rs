@@ -1,6 +1,8 @@
+mod ast;
 mod parser;
 mod scope_graph;
 
+use ast::SourceFile;
 use parser::parse;
 use scope_graph::{RefId, ScopeGraph};
 use std::env;
@@ -22,7 +24,8 @@ fn main() {
     });
 
     let root = parse(&code);
-    let graph = ScopeGraph::build(&root);
+    let source_file = SourceFile::cast(root);
+    let graph = ScopeGraph::build(&source_file);
 
     println!("Scopes constructed: {}", graph.scope_count());
     println!("Declarations: {}", graph.declaration_count());
