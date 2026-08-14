@@ -13,6 +13,6 @@ not have a parent scope link. This is for clarity and also to avoid the
 unexpected situation that we could import symbols from parent scopes.
 
 Because of the current heat wave I did not have the energy to write this code by
-myself, mostly. About 95% are done by Gemini. My main interest was whether we
+myself, mostly. About 95% is done by Gemini. My main interest was whether we
 can find a cheap graph representation with very limited memory allocations. The
 code is not highly optimized but it is already quite ok.
