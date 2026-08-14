@@ -1,0 +1,18 @@
+let global_val = 10;
+
+scope math {
+    let factor = 2;
+    let offset = 5;
+}
+
+scope calculation {
+    import global_val;
+    import math.factor;
+
+    let intermediate = global_val * factor;
+
+    {
+        import math.offset;
+        let total = intermediate + offset;
+    }
+}
